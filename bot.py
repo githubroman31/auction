@@ -1,130 +1,185 @@
 import os
 import asyncio
-import sqlite3
 from pyrogram import Client, filters
 
-API_ID = int(os.getenv("API_ID", 0))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# ====== BOT CONFIG ======
+API_ID = int(os.getenv("API_ID", "25021528"))
+API_HASH = os.getenv("API_HASH", "ea73f0e2e8595b85030aa59a11b3ef3b")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8474302248:AAHv8ysTaoYi36tSqDgKJ-bI5yZ-sh7vd2U")
 
-bot = Client("auction-bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+bot = Client("auction_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# SQLite setup
-conn = sqlite3.connect("auction.db", check_same_thread=False)
-cur = conn.cursor()
-cur.execute("CREATE TABLE IF NOT EXISTS sold (player TEXT, team TEXT, price INTEGER)")
-cur.execute("CREATE TABLE IF NOT EXISTS unsold (player TEXT)")
-cur.execute("CREATE TABLE IF NOT EXISTS teams (team TEXT, captain TEXT)")
-conn.commit()
-
+# ====== GLOBAL STATES ======
+auction_creator = None
+purse_amount = None
+registered_players = set()
 current_player = None
-current_bid = 0
-current_bidder = None
-auction_active = False
-bid_task = None
+highest_bid = 0
+highest_bidder = None
+auction_task = None
+sold_players = {}
+unsold_players = []
 
+# ====== COMMANDS ======
 
-async def auto_close(chat_id):
-    """Close auction after inactivity"""
-    global auction_active, current_player, current_bid, current_bidder
+# Set purse (only once to initialize creator)
+@bot.on_message(filters.command("set_purse"))
+async def set_purse(client, message):
+    global auction_creator, purse_amount
 
-    await asyncio.sleep(15)
-    if auction_active:
-        await bot.send_message(chat_id, f"⚠️ 15 seconds left for {current_player}! Place your bids fast!")
-    await asyncio.sleep(15)
+    if auction_creator and message.from_user.id != auction_creator:
+        return await message.reply("⚠️ Only auction creator can reset purse!")
 
-    if auction_active:
-        if current_bidder:
-            await bot.send_message(chat_id, f"✅ SOLD! {current_player} goes to {current_bidder} for {current_bid} coins.")
-            cur.execute("INSERT INTO sold VALUES (?, ?, ?)", (current_player, current_bidder, current_bid))
-            cur.execute("INSERT OR IGNORE INTO teams VALUES (?, ?)", (current_bidder, current_bidder))
-        else:
-            await bot.send_message(chat_id, f"❌ UNSOLD! No bids for {current_player}.")
-            cur.execute("INSERT INTO unsold VALUES (?)", (current_player,))
-        conn.commit()
+    if len(message.command) < 2:
+        return await message.reply("Usage: /set_purse <amount>")
 
-        auction_active = False
-        current_player = None
+    purse_amount = int(message.command[1])
+    auction_creator = message.from_user.id
+    await message.reply(f"💰 Purse set to {purse_amount} XP\n👑 Auction creator: {message.from_user.first_name}")
 
+# Change creator
+@bot.on_message(filters.command("set_creator"))
+async def set_creator(client, message):
+    global auction_creator
 
+    if message.from_user.id != auction_creator:
+        return await message.reply("⚠️ Only current auction creator can transfer rights!")
+
+    if message.reply_to_message:
+        new_creator = message.reply_to_message.from_user
+    elif len(message.command) > 1:
+        username = message.command[1]
+        try:
+            new_creator = await client.get_users(username)
+        except:
+            return await message.reply("⚠️ Invalid username.")
+    else:
+        return await message.reply("Usage: /set_creator @username or reply to user")
+
+    auction_creator = new_creator.id
+    await message.reply(f"👑 Auction control transferred to **{new_creator.first_name}**")
+
+# Register players
+@bot.on_message(filters.command("register"))
+async def register_player(client, message):
+    global registered_players, auction_creator
+
+    if message.from_user.id != auction_creator:
+        return await message.reply("⚠️ Only auction creator can register players!")
+
+    if len(message.command) < 2:
+        return await message.reply("Usage: /register <player_name>")
+
+    player = " ".join(message.command[1:])
+    registered_players.add(player)
+    await message.reply(f"✅ Registered player: {player}")
+
+# Start auction
 @bot.on_message(filters.command("start_auction"))
 async def start_auction(client, message):
-    global auction_active, current_player, current_bid, current_bidder, bid_task
-    if auction_active:
-        return await message.reply("⚠️ Another auction is already running. End it first.")
+    global current_player, highest_bid, highest_bidder, auction_task
+
+    if message.from_user.id != auction_creator:
+        return await message.reply("⚠️ Only auction creator can start auctions!")
 
     if len(message.command) < 2:
         return await message.reply("Usage: /start_auction <player_name>")
 
-    current_player = " ".join(message.command[1:])
-    current_bid = 0
-    current_bidder = None
-    auction_active = True
+    player = " ".join(message.command[1:])
+    if player not in registered_players:
+        return await message.reply("⚠️ Player not registered!")
 
-    await message.reply(f"🎬 Auction started for **{current_player}**!\nUse `/bid <amount>` to place your bids.")
+    current_player = player
+    highest_bid = 0
+    highest_bidder = None
+    await message.reply(f"🏏 Auction started for **{player}**!\n💰 Current Bid: 0 XP")
 
-    bid_task = asyncio.create_task(auto_close(message.chat.id))
+    if auction_task:
+        auction_task.cancel()
+    auction_task = asyncio.create_task(auction_timer(client, message.chat.id))
 
-
+# Bid
 @bot.on_message(filters.command("bid"))
 async def bid(client, message):
-    global current_bid, current_bidder, auction_active
-    if not auction_active:
-        return await message.reply("⚠️ No active auction. Start one with /start_auction")
+    global highest_bid, highest_bidder, current_player
 
-    if len(message.command) < 2 or not message.command[1].isdigit():
+    if not current_player:
+        return await message.reply("⚠️ No active auction right now!")
+
+    if len(message.command) < 2:
         return await message.reply("Usage: /bid <amount>")
 
-    amount = int(message.command[1])
-    if amount <= current_bid:
-        return await message.reply(f"⚠️ Bid must be higher than {current_bid}")
+    try:
+        amount = int(message.command[1])
+    except:
+        return await message.reply("⚠️ Invalid amount.")
 
-    current_bid = amount
-    current_bidder = message.from_user.first_name
-    await message.reply(f"💰 {current_bidder} bids {current_bid} coins for {current_player}!")
+    if amount <= highest_bid:
+        return await message.reply("⚠️ Bid must be higher than current bid!")
 
+    highest_bid = amount
+    highest_bidder = message.from_user
+    await message.reply(f"💸 {highest_bidder.first_name} placed a bid of {highest_bid} XP for **{current_player}**")
 
+# End auction manually
 @bot.on_message(filters.command("end_auction"))
 async def end_auction(client, message):
-    global auction_active, current_player, current_bid, current_bidder, bid_task
-    if not auction_active:
-        return await message.reply("⚠️ No active auction to end.")
+    if message.from_user.id != auction_creator:
+        return await message.reply("⚠️ Only auction creator can end auctions!")
 
-    if bid_task:
-        bid_task.cancel()
+    await finalize_auction(client, message.chat.id)
 
-    if current_bidder:
-        await message.reply(f"✅ SOLD! {current_player} goes to {current_bidder} for {current_bid} coins.")
-        cur.execute("INSERT INTO sold VALUES (?, ?, ?)", (current_player, current_bidder, current_bid))
-        cur.execute("INSERT OR IGNORE INTO teams VALUES (?, ?)", (current_bidder, current_bidder))
-    else:
-        await message.reply(f"❌ UNSOLD! No bids for {current_player}.")
-        cur.execute("INSERT INTO unsold VALUES (?)", (current_player,))
-    conn.commit()
-
-    auction_active = False
-    current_player = None
-
-
+# Teams
 @bot.on_message(filters.command("teams"))
 async def teams(client, message):
-    cur.execute("SELECT team, captain FROM teams")
-    rows = cur.fetchall()
-    if not rows:
-        return await message.reply("⚠️ No teams created yet.")
+    if not sold_players:
+        return await message.reply("⚠️ No players sold yet!")
 
-    txt = "📋 Teams:\n"
-    for r in rows:
-        txt += f"🏏 {r[0]} (Captain: {r[1]})\n"
-    await message.reply(txt)
+    text = "📋 Teams:\n"
+    for captain_id, data in sold_players.items():
+        captain_name = data['captain']
+        text += f"\n👑 {captain_name}'s Team:\n"
+        for p, amt in data['players']:
+            text += f"  • {p} ({amt} XP)\n"
+    await message.reply(text)
 
-
+# Unsold
 @bot.on_message(filters.command("unsold"))
 async def unsold(client, message):
-    cur.execute("SELECT player FROM unsold")
-    rows = cur.fetchall()
-    if not rows:
-        return await message.reply("✅ No unsold players yet.")
+    if not unsold_players:
+        return await message.reply("⚠️ No unsold players.")
+    await message.reply("🚫 Unsold Players:\n" + "\n".join(unsold_players))
 
-    txt = "❌ Unsold Players:\n" + "\n".join([f"- {r[0]}" for r in rows])
-    await message.reply(txt)
+# ====== HELPERS ======
+async def auction_timer(client, chat_id):
+    global current_player
+    try:
+        await asyncio.sleep(15)
+        await client.send_message(chat_id, "⏳ 15s left! Place your bids fast!")
+        await asyncio.sleep(15)
+        await finalize_auction(client, chat_id)
+    except asyncio.CancelledError:
+        pass
+
+async def finalize_auction(client, chat_id):
+    global current_player, highest_bid, highest_bidder, sold_players, unsold_players, auction_task
+
+    if not current_player:
+        return
+
+    if highest_bidder:
+        cap_id = highest_bidder.id
+        if cap_id not in sold_players:
+            sold_players[cap_id] = {"captain": highest_bidder.first_name, "players": []}
+        sold_players[cap_id]["players"].append((current_player, highest_bid))
+        await client.send_message(chat_id, f"✅ SOLD! **{current_player}** bought by {highest_bidder.first_name} for {highest_bid} XP")
+    else:
+        unsold_players.append(current_player)
+        await client.send_message(chat_id, f"🚫 UNSOLD! **{current_player}**")
+
+    current_player = None
+    highest_bid = 0
+    highest_bidder = None
+    if auction_task:
+        auction_task.cancel()
+        auction_task = None
