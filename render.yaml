@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: auction-bot
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      - key: API_ID
+        value: "25021528"
+      - key: API_HASH
+        value: "ea73f0e2e8595b85030aa59a11b3ef3b"
+      - key: BOT_TOKEN
+        value: "8474302248:AAHv8ysTaoYi36tSqDgKJ-bI5yZ-sh7vd2U"
