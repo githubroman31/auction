@@ -4,11 +4,16 @@ from pyrogram import Client, filters
 import os
 import time
 
-API_ID = int(os.getenv("API_ID", "25021528"))
-API_HASH = os.getenv("API_HASH", "ea73f0e2e8595b85030aa59a11b3ef3b")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8474302248:AAHv8ysTaoYi36tSqDgKJ-bI5yZ-sh7vd2U")
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-bot = Client("auction_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+bot = Client(
+    "auction_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
 DB_PATH = "auction.db"
 
