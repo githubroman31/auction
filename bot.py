@@ -1,4 +1,5 @@
 # bot.py
+import os
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
